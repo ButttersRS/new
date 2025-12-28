@@ -1,0 +1,370 @@
+#include <Servo.h>
+
+// ---------- Pins ----------
+#define SERVO1_PIN 2
+#define SERVO2_PIN 4
+#define SERVO3_PIN 7
+#define SERVO4_PIN 8
+#define SERVO5_PIN 12
+#define SERVO6_PIN A1
+
+#define STRIP1_R 9
+#define STRIP1_G 10
+#define STRIP1_B 11
+
+#define STRIP2_R 3
+#define STRIP2_G 5
+#define STRIP2_B 6
+
+#define DOORBELL_PIN A0
+
+// ---------- Servos ----------
+Servo s1, s2, s3, s4, s5, s6;
+
+// ---------- State ----------
+String input = "";
+
+// Servo5 sweep
+bool servo5Moving = false;
+int servo5Pos = 180;
+bool servo5Returning = false;
+unsigned long servo5PrevMillis = 0;
+int servo5StepDelay_down = 54;
+int servo5StepDelay_up   = 65;
+
+// Doorbell
+bool bellActive = false;
+unsigned long bellStartMillis = 0;
+unsigned long bellDuration = 2000;
+const unsigned long bellDurations[5] = {1000, 2000, 3000, 5000, 10000};
+
+// Strip2
+uint8_t lastColorR = 255, lastColorG = 255, lastColorB = 255;
+uint8_t brightnessPercent = 100;  // 0, 20, 40, 60, 80, 100
+bool strip2On = true;
+
+// Effects
+enum EffectType { NONE, FADE, RAINBOW, BREATH, FLASH };
+EffectType currentEffect = NONE;
+bool effectActive = false;
+
+unsigned long effectPrevMillis = 0;
+int fadeStep = 0;
+int rainbowStep = 0;
+int breathVal = 0;
+int breathDir = 1;
+bool flashState = false;
+
+// ---------- Helpers ----------
+void setStrip1RGB(uint8_t r, uint8_t g, uint8_t b) {
+  analogWrite(STRIP1_R, r);
+  analogWrite(STRIP1_G, g);
+  analogWrite(STRIP1_B, b);
+}
+
+void setStrip2PWM(uint8_t r, uint8_t g, uint8_t b) {
+  if (!strip2On) {
+    analogWrite(STRIP2_R, 0);
+    analogWrite(STRIP2_G, 0);
+    analogWrite(STRIP2_B, 0);
+    return;
+  }
+  uint16_t scale = (uint16_t)brightnessPercent * 255 / 100;
+  analogWrite(STRIP2_R, (uint32_t)r * scale / 255);
+  analogWrite(STRIP2_G, (uint32_t)g * scale / 255);
+  analogWrite(STRIP2_B, (uint32_t)b * scale / 255);
+}
+
+void setStrip2Color(uint8_t r, uint8_t g, uint8_t b) {
+  lastColorR = r; lastColorG = g; lastColorB = b;
+  currentEffect = NONE;
+  effectActive = false;
+  setStrip2PWM(r, g, b);
+}
+
+void turnStrip2Off() {
+  strip2On = false;
+  setStrip2PWM(0, 0, 0);
+}
+
+void turnStrip2On() {
+  strip2On = true;
+  setStrip2PWM(lastColorR, lastColorG, lastColorB);
+}
+
+// ---------- Servo Functions ----------
+void moveQuick(Servo &s) {
+  if (servo5Moving) return;
+  s.write(90); delay(500); s.write(0);
+}
+
+void moveServo6(int angle) {
+  s6.write(angle);
+}
+
+void startServo5Sweep() {
+  if (!servo5Moving) {
+    servo5Moving = true;
+    servo5Returning = false;
+    servo5Pos = 180;
+    servo5PrevMillis = millis();
+    s5.write(servo5Pos);
+    setStrip1RGB(255, 0, 0);
+  }
+}
+
+void updateServo5() {
+  if (!servo5Moving) return;
+  unsigned long now = millis();
+  int stepDelay = servo5Returning ? servo5StepDelay_up : servo5StepDelay_down;
+  if (now - servo5PrevMillis >= stepDelay) {
+    servo5PrevMillis = now;
+    if (!servo5Returning) {
+      servo5Pos--;
+      if (servo5Pos <= 75) {
+        servo5Pos = 75;
+        servo5Returning = true;
+        servo5PrevMillis += 300;
+      }
+    } else {
+      servo5Pos++;
+      if (servo5Pos >= 180) {
+        servo5Pos = 180;
+        servo5Moving = false;
+      }
+    }
+    s5.write(servo5Pos);
+  }
+}
+
+// ---------- Doorbell ----------
+void startDoorbell(unsigned long duration_ms = 2000) {
+  bellActive = true;
+  bellStartMillis = millis();
+  bellDuration = duration_ms;
+  digitalWrite(DOORBELL_PIN, HIGH);
+  setStrip1RGB(0, 0, 255);
+}
+
+void updateDoorbell() {
+  if (!bellActive) return;
+  if (millis() - bellStartMillis >= bellDuration) {
+    bellActive = false;
+    digitalWrite(DOORBELL_PIN, LOW);
+    if (servo5Moving) setStrip1RGB(255, 0, 0);
+    else setStrip1RGB(0, 255, 0);
+  }
+}
+
+// ---------- Effects ----------
+void stopCurrentEffect() {
+  effectActive = false;
+  currentEffect = NONE;
+  setStrip2PWM(lastColorR, lastColorG, lastColorB);
+}
+
+void startEffect(EffectType e) {
+  currentEffect = e;
+  effectActive = true;
+  effectPrevMillis = millis();
+  fadeStep = rainbowStep = breathVal = 0;
+  breathDir = 1;
+  flashState = false;
+}
+
+void updateEffects() {
+  if (!effectActive) return;
+  unsigned long now = millis();
+
+  switch (currentEffect) {
+    case FADE:
+      if (now - effectPrevMillis >= 40) {
+        effectPrevMillis = now;
+        int phase = fadeStep / 255;
+        int val = fadeStep % 255;
+        uint8_t r, g, b;
+        if (phase == 0) { r = 255 - val; g = 0;     b = val; }
+        else if (phase == 1) { r = 0;     g = val; b = 255 - val; }
+        else { r = val;   g = 255 - val; b = 0; }
+        setStrip2PWM(r, g, b);
+        if (++fadeStep >= 255 * 3) fadeStep = 0;
+      }
+      break;
+
+    case RAINBOW:
+      if (now - effectPrevMillis >= 400) {
+        effectPrevMillis = now;
+        switch (rainbowStep % 6) {
+          case 0: setStrip2PWM(255,0,0);   break;
+          case 1: setStrip2PWM(0,255,0);   break;
+          case 2: setStrip2PWM(0,0,255);   break;
+          case 3: setStrip2PWM(255,255,0); break;
+          case 4: setStrip2PWM(0,255,255); break;
+          case 5: setStrip2PWM(255,0,255); break;
+        }
+        rainbowStep++;
+      }
+      break;
+
+    case BREATH:
+      if (now - effectPrevMillis >= 15) {
+        effectPrevMillis = now;
+        breathVal += breathDir * 4;
+        if (breathVal >= 255) { breathVal = 255; breathDir = -1; }
+        if (breathVal <= 0)   { breathVal = 0;   breathDir = 1; }
+        setStrip2PWM((uint32_t)lastColorR * breathVal / 255,
+                     (uint32_t)lastColorG * breathVal / 255,
+                     (uint32_t)lastColorB * breathVal / 255);
+      }
+      break;
+
+    case FLASH:
+      if (now - effectPrevMillis >= 500) {
+        effectPrevMillis = now;
+        flashState = !flashState;
+        setStrip2PWM(flashState ? lastColorR : 0,
+                     flashState ? lastColorG : 0,
+                     flashState ? lastColorB : 0);
+      }
+      break;
+
+    default: break;
+  }
+}
+
+// ---------- Brightness Step Control ----------
+void dimBrightness() {
+  if (brightnessPercent > 0) {
+    brightnessPercent = max(0, brightnessPercent - 20);
+    if (!effectActive) setStrip2PWM(lastColorR, lastColorG, lastColorB);
+  }
+}
+
+void brightenBrightness() {
+  if (brightnessPercent < 100) {
+    brightnessPercent = min(100, brightnessPercent + 20);
+    if (!effectActive) setStrip2PWM(lastColorR, lastColorG, lastColorB);
+  }
+}
+
+// ---------- Command Parsing ----------
+void handleCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+  if (cmd.length() == 0) return;
+
+  // Doorbell durations
+  if (cmd.startsWith("bell") && cmd.length() == 5 && cmd[4] >= '1' && cmd[4] <= '5') {
+    int idx = cmd[4] - '1';
+    startDoorbell(bellDurations[idx]);
+    return;
+  }
+  if (cmd == "doorbell" || cmd == "bell") {
+    startDoorbell(2000);
+    return;
+  }
+
+  // Train servo
+  if (cmd == "trainstop")      { moveServo6(90);  return; }
+  if (cmd == "trainforward")   { moveServo6(30);  return; }
+  if (cmd == "trainbackwards") { moveServo6(150); return; }
+
+  // Servo 5
+  if (cmd == "s5") {
+    startServo5Sweep();
+    return;
+  }
+
+  // Servos 1-4
+  if (cmd == "s1go") { if (!servo5Moving) moveQuick(s1); return; }
+  if (cmd == "s2go") { if (!servo5Moving) moveQuick(s2); return; }
+  if (cmd == "s3go") { if (!servo5Moving) moveQuick(s3); return; }
+  if (cmd == "s4go") { if (!servo5Moving) moveQuick(s4); return; }
+
+  // Strip2 power
+  if (cmd == "on" || cmd == "turn on")  { turnStrip2On();  return; }
+  if (cmd == "off" || cmd == "turn off"){ turnStrip2Off(); return; }
+
+  // Colors
+  if (cmd == "red")     { setStrip2Color(255, 0, 0);   return; }
+  if (cmd == "green")   { setStrip2Color(0, 255, 0);   return; }
+  if (cmd == "blue")    { setStrip2Color(0, 0, 255);   return; }
+  if (cmd == "yellow")  { setStrip2Color(255, 255, 0); return; }
+  if (cmd == "magenta") { setStrip2Color(255, 0, 255); return; }
+  if (cmd == "cyan")    { setStrip2Color(0, 255, 255); return; }
+  if (cmd == "offcolor" || cmd == "strip2off") { setStrip2Color(0,0,0); return; }
+
+  // Effects
+  if (cmd == "fade")           { startEffect(FADE);    return; }
+  if (cmd == "rainbow")        { startEffect(RAINBOW); return; }
+  if (cmd == "breath" || cmd == "breathing") { startEffect(BREATH); return; }
+  if (cmd == "flash")          { startEffect(FLASH);  return; }
+
+  // Stop effects
+  if (cmd == "!fadeoff")    { if (currentEffect == FADE)    stopCurrentEffect(); return; }
+  if (cmd == "!rainbowoff") { if (currentEffect == RAINBOW) stopCurrentEffect(); return; }
+  if (cmd == "!breathoff")  { if (currentEffect == BREATH)  stopCurrentEffect(); return; }
+  if (cmd == "!flashoff")   { if (currentEffect == FLASH)   stopCurrentEffect(); return; }
+  if (cmd == "!Eoff" || cmd == "!offall") { stopCurrentEffect(); return; }
+
+  // NEW: Step brightness
+  if (cmd == "!dim") {
+    dimBrightness();
+    return;
+  }
+  if (cmd == "!brighten") {
+    brightenBrightness();
+    return;
+  }
+
+  // Unknown
+  Serial.print("Unknown cmd: ");
+  Serial.println(cmd);
+}
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(9600);
+
+  s1.attach(SERVO1_PIN);
+  s2.attach(SERVO2_PIN);
+  s3.attach(SERVO3_PIN);
+  s4.attach(SERVO4_PIN);
+  s5.attach(SERVO5_PIN);
+  s6.attach(SERVO6_PIN);
+
+  pinMode(STRIP1_R, OUTPUT);
+  pinMode(STRIP1_G, OUTPUT);
+  pinMode(STRIP1_B, OUTPUT);
+  pinMode(STRIP2_R, OUTPUT);
+  pinMode(STRIP2_G, OUTPUT);
+  pinMode(STRIP2_B, OUTPUT);
+
+  pinMode(DOORBELL_PIN, OUTPUT);
+  digitalWrite(DOORBELL_PIN, LOW);
+
+  setStrip1RGB(0, 255, 0);
+  setStrip2Color(255, 255, 255);
+  s6.write(90);
+}
+
+// ---------- Loop ----------
+void loop() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      handleCommand(input);
+      input = "";
+    } else {
+      input += c;
+    }
+  }
+
+  updateServo5();
+  updateDoorbell();
+  updateEffects();
+
+  if (!bellActive) {
+    setStrip1RGB(servo5Moving ? 255 : 0, servo5Moving ? 0 : 255, 0);
+  }
+}
